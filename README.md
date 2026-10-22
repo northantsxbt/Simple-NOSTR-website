@@ -34,7 +34,7 @@ var SITE_CONFIG = {
 | `npub` | The account the site displays. Paste an `npub1…` key (a bare 64-character hex pubkey also works). |
 | `perPage` | How many posts, images or events appear on each page. |
 | `pages` | Turns each optional page on or off — see below. |
-| `relays` | Which relays to read from. All are queried at once and the results merged, so extra relays only add resilience when one is down. |
+| `relays` | Which relays to start from. The relays on the account's own [NIP-65](https://github.com/nostr-protocol/nips/blob/master/65.md) relay list (kind 10002) are added automatically, except any marked read-only. All are queried at once and the results merged, so extra relays only add resilience when one is down. |
 
 If the `npub` is missing or malformed, or the relay list is empty, the site says so
 on the page instead of loading blank.

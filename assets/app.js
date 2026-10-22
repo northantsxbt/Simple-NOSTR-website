@@ -32,6 +32,8 @@
   var KINDS = [0, 1];
   if (PAGES.calendar) KINDS = KINDS.concat([31922, 31923]);
   if (PAGES.articles) KINDS = KINDS.concat([30023]);
+  // Kind 10002 is this account's NIP-65 relay list, which adds relays to read from.
+  KINDS = KINDS.concat([10002]);
   // Kind 3 is this account's contact list — the web of trust the Mentions page filters by.
   if (PAGES.mentions) KINDS = KINDS.concat([3]);
   var CACHE_KEY = "nbn-events-v1";   // scoped per account below, so switching keys never shows stale posts
@@ -252,11 +254,12 @@
 
   function saveCache() {
     try {
-      // The contact list goes first: without it the Mentions filter has nothing to
-      // work from, and it must not be lost to the size trim.
+      // The contact list and relay list go first: without them the Mentions filter
+      // and the relay set have nothing to work from, and neither must be lost to
+      // the size trim.
       var all = Array.from(events.values());
-      var keep = all.filter(function (e) { return e.kind === 3 && e.pubkey === PUBKEY; })
-        .concat(all.filter(function (e) { return !(e.kind === 3 && e.pubkey === PUBKEY); }));
+      var own = function (e) { return (e.kind === 3 || e.kind === 10002) && e.pubkey === PUBKEY; };
+      var keep = all.filter(own).concat(all.filter(function (e) { return !own(e); }));
       localStorage.setItem(CACHE_KEY, JSON.stringify(keep.slice(0, 400)));
     } catch (e) { /* quota or blocked — the site works fine without the cache */ }
   }
@@ -1603,6 +1606,29 @@
   }
 
   // ---------- relay connections ----------
+  /* The relays in config.js are only the starting point. This account's NIP-65
+     list (kind 10002) names where it publishes, so any relay on it is added and
+     queried too. Relays marked read-only are skipped: nothing is published there. */
+  var MAX_LISTED_RELAYS = 10;
+  var pending = [];
+  var relayListAt = 0;
+
+  function adoptRelays(ev) {
+    if (!ev || ev.kind !== 10002 || ev.pubkey !== PUBKEY || ev.created_at <= relayListAt) return;
+    relayListAt = ev.created_at;
+    var seen = RELAYS.map(function (r) { return r.replace(/\/+$/, ""); });
+    (ev.tags || []).filter(function (t) {
+      return t[0] === "r" && t[1] && t[2] !== "read";
+    }).slice(0, MAX_LISTED_RELAYS).forEach(function (t) {
+      var url = String(t[1]).trim();
+      var bare = url.replace(/\/+$/, "");
+      if (!/^wss?:\/\/.+/i.test(url) || seen.indexOf(bare) !== -1) return;
+      seen.push(bare);
+      RELAYS.push(url);
+      pending.push(connect(url));
+    });
+  }
+
   function connect(url) {
     return new Promise(function (resolve) {
       var ws, count = 0, settled = false;
@@ -1635,6 +1661,7 @@
           if (!events.has(data[2].id)) {
             events.set(data[2].id, data[2]);
             count++;
+            if (data[2].kind === 10002) adoptRelays(data[2]);
             if (data[2].kind === 0) absorbProfile();
             queueRender();
           }
@@ -1713,7 +1740,16 @@
   loadCache();
   render();
 
-  Promise.all(RELAYS.map(connect)).then(function () {
+  RELAYS.slice().forEach(function (url) { pending.push(connect(url)); });
+  // A relay list cached from an earlier visit is used straight away.
+  events.forEach(adoptRelays);
+
+  // Relays found on the relay list join mid-flight, so wait until none are outstanding.
+  function settle() {
+    var n = pending.length;
+    return Promise.all(pending).then(function () { if (pending.length !== n) return settle(); });
+  }
+  settle().then(function () {
     absorbProfile();
     saveCache();
     render();

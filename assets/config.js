@@ -39,8 +39,9 @@ var SITE_CONFIG = {
     ]
   },
 
-  /* Relays to read from. The site queries all of them at once and merges the
-     results, so extras only add redundancy — if one is down or slow, the rest
+  /* Relays to start from. The site also adds the relays on the account's own
+     NIP-65 relay list (kind 10002) once it arrives. It queries all of them at
+     once and merges the results, so extras only add redundancy — if one is down or slow, the rest
      still deliver. nos.lol currently holds the fullest archive. */
   relays: [
     "wss://nos.lol",
