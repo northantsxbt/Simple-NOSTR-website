@@ -32,6 +32,8 @@
   var KINDS = [0, 1];
   if (PAGES.calendar) KINDS = KINDS.concat([31922, 31923]);
   if (PAGES.articles) KINDS = KINDS.concat([30023]);
+  // Kind 5 is this account's deletion requests, which hide the events they name.
+  KINDS = KINDS.concat([5]);
   // Kind 10002 is this account's NIP-65 relay list, which adds relays to read from.
   KINDS = KINDS.concat([10002]);
   // Kind 3 is this account's contact list — the web of trust the Mentions page filters by.
@@ -248,17 +250,52 @@
       var raw = localStorage.getItem(CACHE_KEY);
       if (!raw) return;
       JSON.parse(raw).forEach(function (e) { events.set(e.id, e); });
+      events.forEach(function (e) { if (e.kind === 5 && e.pubkey === PUBKEY) noteDeletion(e); });
+      sweep();
       absorbProfile();
     } catch (e) { /* private mode, blocked storage, corrupt entry — ignore */ }
   }
 
+  /* ---- deletions and replaced versions ----
+     A kind 5 request (NIP-09) from this account hides the events it names, and an
+     addressable event (kind 30000-39999) keeps only its newest version. Both run
+     on what arrives and on the cache, so a stale cached copy cannot come back. */
+  var deletedIds = {};
+  var deletedAddrs = {};   // address -> time of the newest deletion request naming it
+
+  function noteDeletion(ev) {
+    (ev.tags || []).forEach(function (t) {
+      if (t[0] === "e" && t[1]) deletedIds[t[1]] = true;
+      else if (t[0] === "a" && t[1]) deletedAddrs[t[1]] = Math.max(deletedAddrs[t[1]] || 0, ev.created_at);
+    });
+  }
+
+  function isAddressable(ev) { return ev.kind >= 30000 && ev.kind <= 39999; }
+
+  function isDeleted(ev) {
+    if (deletedIds[ev.id]) return true;
+    return isAddressable(ev) && (deletedAddrs[addressOf(ev)] || 0) >= ev.created_at;
+  }
+
+  function sweep() {
+    var newest = {};
+    events.forEach(function (e) {
+      if (!isAddressable(e)) return;
+      var k = addressOf(e);
+      if (!newest[k] || e.created_at > newest[k].created_at) newest[k] = e;
+    });
+    events.forEach(function (e, id) {
+      if (isDeleted(e) || (isAddressable(e) && newest[addressOf(e)] !== e)) events.delete(id);
+    });
+  }
+
   function saveCache() {
     try {
-      // The contact list and relay list go first: without them the Mentions filter
-      // and the relay set have nothing to work from, and neither must be lost to
-      // the size trim.
+      // The contact list, relay list and deletion requests go first: without them
+      // the Mentions filter, the relay set and the deletions have nothing to work
+      // from, and none must be lost to the size trim.
       var all = Array.from(events.values());
-      var own = function (e) { return (e.kind === 3 || e.kind === 10002) && e.pubkey === PUBKEY; };
+      var own = function (e) { return (e.kind === 3 || e.kind === 5 || e.kind === 10002) && e.pubkey === PUBKEY; };
       var keep = all.filter(own).concat(all.filter(function (e) { return !own(e); }));
       localStorage.setItem(CACHE_KEY, JSON.stringify(keep.slice(0, 400)));
     } catch (e) { /* quota or blocked — the site works fine without the cache */ }
@@ -1658,8 +1695,11 @@
         var data;
         try { data = JSON.parse(msg.data); } catch (e) { return; }
         if (data[0] === "EVENT" && data[2] && data[2].id) {
-          if (!events.has(data[2].id)) {
-            events.set(data[2].id, data[2]);
+          var inc = data[2];
+          if (!events.has(inc.id) && (inc.kind !== 5 || inc.pubkey === PUBKEY) && !isDeleted(inc)) {
+            if (inc.kind === 5) noteDeletion(inc);
+            events.set(inc.id, inc);
+            if (inc.kind === 5 || isAddressable(inc)) sweep();
             count++;
             if (data[2].kind === 10002) adoptRelays(data[2]);
             if (data[2].kind === 0) absorbProfile();
